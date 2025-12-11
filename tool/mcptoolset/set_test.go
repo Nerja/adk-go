@@ -409,3 +409,79 @@ func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, 
 	}
 	return ct.Connect(ctx)
 }
+
+func TestNoReconnectOnMethodNotFoundPingError(t *testing.T) {
+	// Verifies that when Ping returns MethodNotFound (-32601),
+	// the toolset does NOT reconnect (considers session still valid).
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	// Create a basic server (it will return MethodNotFound for Ping if not implemented)
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	_, err := server.Connect(context.Background(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spyTransport := &contextSpyTransport{Transport: clientTransport}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: spyTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{}))
+
+	// First call to Tools should create a session.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("First Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 1 {
+		t.Errorf("Expected 1 Connect call, got %d", spyTransport.connectCount)
+	}
+
+	// Second call should NOT reconnect (MethodNotFound is acceptable)
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("Second Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 1 {
+		t.Errorf("Expected 1 Connect call (no reconnect for MethodNotFound), got %d", spyTransport.connectCount)
+	}
+}
+
+func TestReconnectOnNonMethodNotFoundPingError(t *testing.T) {
+	// Verifies that when Ping fails with an error OTHER than MethodNotFound,
+	// the toolset will reconnect (similar to TestSessionRecreationOnTransportClose).
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+
+	rt := &reconnectableTransport{server: server}
+	spyTransport := &contextSpyTransport{Transport: rt}
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: spyTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{}))
+
+	// First call to Tools should create a session.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("First Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 1 {
+		t.Errorf("Expected 1 Connect call, got %d", spyTransport.connectCount)
+	}
+
+	// Close the connection to cause a non-MethodNotFound Ping error
+	spyTransport.lastConn.Close()
+
+	// Second call should reconnect (non-MethodNotFound errors trigger reconnect)
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("Second Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 2 {
+		t.Errorf("Expected 2 Connect calls (reconnect on error), got %d", spyTransport.connectCount)
+	}
+}

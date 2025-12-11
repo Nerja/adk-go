@@ -17,9 +17,11 @@ package mcptoolset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/agent"
@@ -139,7 +141,12 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 	defer s.mu.Unlock()
 
 	if s.session != nil {
-		return s.session, nil
+		if err := s.session.Ping(ctx, &mcp.PingParams{}); err == nil {
+			return s.session, nil
+		} else if isMethodNotFound(err) {
+			// Ping not implemented by the server (-32601), so we assume the session is still valid.
+			return s.session, nil
+		}
 	}
 
 	session, err := s.client.Connect(context.Background(), s.transport, nil)
@@ -149,4 +156,12 @@ func (s *set) getSession(ctx context.Context) (*mcp.ClientSession, error) {
 
 	s.session = session
 	return s.session, nil
+}
+
+func isMethodNotFound(err error) bool {
+	var jsonrpcErr *jsonrpc.Error
+	if errors.As(err, &jsonrpcErr) {
+		return jsonrpcErr.Code == jsonrpc.CodeMethodNotFound
+	}
+	return false
 }

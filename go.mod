@@ -17,7 +17,7 @@ require (
 require (
 	github.com/google/jsonschema-go v0.3.0
 	github.com/google/safehtml v0.1.0
-	github.com/modelcontextprotocol/go-sdk v0.7.0
+	github.com/modelcontextprotocol/go-sdk v1.1.1-0.20251211201604-bae09298203a
 	gorm.io/gorm v1.31.0
 )
 
