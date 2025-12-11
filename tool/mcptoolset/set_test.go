@@ -328,13 +328,8 @@ func TestSessionContextCancellation(t *testing.T) {
 		t.Fatalf("Failed to create MCP tool set: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	_, err = ts.Tools(icontext.NewReadonlyContext(
-		icontext.NewInvocationContext(
-			ctx,
-			icontext.InvocationContextParams{},
-		),
-	))
+	ctx1, cancel := context.WithCancel(context.Background())
+	_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(ctx1, icontext.InvocationContextParams{})))
 	if err != nil {
 		t.Fatalf("First Tools call failed: %v", err)
 	}
@@ -343,21 +338,74 @@ func TestSessionContextCancellation(t *testing.T) {
 	cancel()
 
 	// Check if the context passed to Connect was cancelled.
-	if err := spyTransport.Context().Err(); err != nil {
+	if err := spyTransport.ctx.Err(); err != nil {
 		t.Fatalf("Transport context cancelled: %v. Session is incorrectly tied to request context.", err)
+	}
+
+	_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{})))
+	if err != nil {
+		t.Fatalf("Second Tools call failed: %v", err)
+	}
+}
+
+func TestSessionRecreationOnTransportClose(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+
+	rt := &reconnectableTransport{server: server}
+	spyTransport := &contextSpyTransport{Transport: rt}
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport: spyTransport,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	ctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(context.Background(), icontext.InvocationContextParams{}))
+
+	// First call to Tools should create a session.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("First Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 1 {
+		t.Errorf("Expected 1 Connect call, got %d", spyTransport.connectCount)
+	}
+
+	// Close the underlying connection to simulate transport failure.
+	spyTransport.lastConn.Close()
+
+	// Second call to Tools should detect the closed session (via Ping) and create a new one.
+	if _, err := ts.Tools(ctx); err != nil {
+		t.Fatalf("Second Tools call failed: %v", err)
+	}
+	if spyTransport.connectCount != 2 {
+		t.Errorf("Expected 2 Connect calls, got %d", spyTransport.connectCount)
 	}
 }
 
 type contextSpyTransport struct {
 	mcp.Transport
-	ctx context.Context
+	ctx          context.Context
+	connectCount int
+	lastConn     mcp.Connection
 }
 
 func (t *contextSpyTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	t.ctx = ctx
-	return t.Transport.Connect(ctx)
+	t.connectCount++
+	conn, err := t.Transport.Connect(ctx)
+	t.lastConn = conn
+	return conn, err
 }
 
-func (t *contextSpyTransport) Context() context.Context {
-	return t.ctx
+type reconnectableTransport struct {
+	server *mcp.Server
+}
+
+func (rt *reconnectableTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	ct, st := mcp.NewInMemoryTransports()
+	_, err := rt.server.Connect(context.Background(), st, nil)
+	if err != nil {
+		return nil, err
+	}
+	return ct.Connect(ctx)
 }
